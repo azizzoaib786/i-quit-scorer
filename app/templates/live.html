@@ -6,6 +6,12 @@
     <meta http-equiv="refresh" content="10; url=/live/{{ game.game_id }}{% if selected_round_id %}?round_id={{ selected_round_id }}{% endif %}">
     <script src="https://cdn.tailwindcss.com"></script>
     <title>{{ game.name }} — Live Scores</title>
+    <link rel="manifest" href="/static/manifest.json" />
+    <meta name="theme-color" content="#7c3aed" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="IQuitScore" />
+    <link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
   </head>
   <body class="bg-gradient-to-br from-violet-100 via-pink-100 to-orange-100 min-h-screen">
     <div class="max-w-3xl mx-auto p-3 sm:p-4">

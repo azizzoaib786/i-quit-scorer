@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request, Form, HTTPException, Cookie, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -15,6 +15,20 @@ from .auth import hash_password, verify_password, create_session_token, verify_s
 app = FastAPI(title="I Quit Scoreboard (HTMX)")
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.get("/sw.js")
+async def service_worker():
+    return FileResponse(
+        "app/static/sw.js",
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/"},
+    )
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse("app/static/icons/icon-192.png", media_type="image/png")
 
 
 # Add custom Jinja2 filter for checking game expiration
