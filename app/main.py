@@ -556,6 +556,26 @@ async def admin_revert_to_player(request: Request, user_id: str):
     })
 
 
+@app.post("/admin/users/{user_id}/reset-password")
+async def admin_reset_password(request: Request, user_id: str):
+    # Generate a temp password and reset the user's password
+    require_admin(request)
+    import secrets, string
+    alphabet = string.ascii_letters + string.digits
+    temp_password = ''.join(secrets.choice(alphabet) for _ in range(10))
+    new_hash = hash_password(temp_password)
+    update_user_password(user_id, new_hash)
+    from .db import list_all_users
+    all_users = list_all_users()
+    target = next((u for u in all_users if u["user_id"] == user_id), None)
+    username = target["username"] if target else user_id
+    return templates.TemplateResponse("partials/user_management.html", {
+        "request": request,
+        "all_users": all_users,
+        "reset_password_msg": f"🔑 Temp password for {username}: {temp_password}",
+    })
+
+
 @app.delete("/admin/users/{user_id}")
 async def admin_delete_user(request: Request, user_id: str):
     # Delete user (admin only)

@@ -4,6 +4,13 @@
     <h2 class="text-xl font-bold text-purple-900">User Management ({{ all_users|length }})</h2>
   </div>
 
+  {% if reset_password_msg %}
+  <div class="mb-4 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 text-amber-900 font-bold text-sm">
+    {{ reset_password_msg }}<br>
+    <span class="font-normal text-xs">Share this with the user — they should change it after login.</span>
+  </div>
+  {% endif %}
+
   {% if all_users %}
   <div class="space-y-2">
     {% for usr in all_users %}
@@ -40,6 +47,16 @@
           </button>
         </form>
         {% endif %}
+        <form
+          hx-post="/admin/users/{{ usr.user_id }}/reset-password"
+          hx-target="#user-management"
+          hx-swap="outerHTML"
+          hx-confirm="Reset password for '{{ usr.username }}'? A new temporary password will be shown."
+        >
+          <button type="submit" class="px-3 py-2 rounded-lg text-white text-sm font-bold shadow-md hover:shadow-lg transition-all bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600">
+            🔑 Reset PW
+          </button>
+        </form>
         <form
           hx-post="/admin/users/{{ usr.user_id }}/toggle-active"
           hx-target="#user-management"
