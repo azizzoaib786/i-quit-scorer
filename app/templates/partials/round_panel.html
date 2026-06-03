@@ -202,23 +202,65 @@
       <span class="text-2xl">👥</span>
       <h2 class="text-lg font-bold text-blue-900">Players</h2>
     </div>
+
+    <!-- Add Me button -->
+    {% if user.username not in game.players %}
     <form
-      class="flex gap-2"
       hx-post="/games/{{ game.game_id }}/players"
       hx-target="#round-panel"
       hx-swap="outerHTML"
     >
-      <input name="player_name" required placeholder="Add players (e.g., Aziz, MK, BL)"
-             class="flex-1 rounded-xl border-2 border-blue-200 focus:border-blue-400 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-lg transition-all"/>
-      <button class="rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-4 py-3 font-semibold shadow-md hover:shadow-lg transition-all">Add</button>
+      <input type="hidden" name="player_user_id" value="{{ user.user_id }}">
+      <button type="submit" class="w-full rounded-xl bg-gradient-to-r from-violet-500 to-pink-500 hover:from-violet-600 hover:to-pink-600 text-white px-4 py-3 font-semibold shadow-md hover:shadow-lg transition-all">
+        👤 + Add Me ({{ user.username }})
+      </button>
     </form>
-    
+    {% endif %}
+
+    <!-- Multi-select player search -->
+    <div>
+      <input
+        type="text"
+        id="player-search-input"
+        oninput="searchPlayers(this.value)"
+        autocomplete="off"
+        placeholder="Search players to add..."
+        class="w-full rounded-xl border-2 border-blue-200 focus:border-blue-400 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-lg transition-all"
+      />
+      <!-- Search results as checkboxes -->
+      <div id="player-search-results" class="hidden mt-2 rounded-xl border-2 border-blue-200 bg-white shadow-lg max-h-52 overflow-y-auto"></div>
+    </div>
+
+    <!-- Selected players tags -->
+    <div id="selected-players-tags" class="flex flex-wrap gap-2 hidden"></div>
+
+    <!-- Batch add form -->
+    <form
+      id="add-players-batch-form"
+      hx-post="/games/{{ game.game_id }}/players/batch"
+      hx-target="#round-panel"
+      hx-swap="outerHTML"
+      class="hidden"
+    >
+      <div id="batch-player-inputs"></div>
+      <button type="submit"
+        class="w-full rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-4 py-3 font-semibold shadow-md hover:shadow-lg transition-all">
+        ➕ Add Selected Players
+      </button>
+    </form>
+
     {% if game.players %}
     <div class="space-y-2">
       {% for p in game.players %}
-      <div class="flex items-center justify-between rounded-lg border border-blue-200 bg-white/70 px-3 py-2">
+      {% set player_uid = game.get('player_ids', {}).get(p, '') %}
+      <div class="flex items-center justify-between rounded-lg border border-blue-200 bg-white/70 px-3 py-2"
+           {% if player_uid %}data-player-uid="{{ player_uid }}"{% endif %}>
+        {% if player_uid %}
+        <a href="/profile/{{ player_uid }}" class="font-medium text-blue-900 hover:text-violet-700 hover:underline">{{ p }}</a>
+        {% else %}
         <span class="font-medium text-blue-900">{{ p }}</span>
-        {% if user.is_admin %}
+        {% endif %}
+        {% if user.is_admin or user.user_id == game.user_id %}
         <form
           hx-post="/games/{{ game.game_id }}/players/remove"
           hx-target="#round-panel"

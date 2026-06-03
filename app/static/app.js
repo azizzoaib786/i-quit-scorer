@@ -2,6 +2,95 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' });
 }
 
+// Multi-select player search
+const _selectedPlayers = {}; // { userId: username }
+
+function _renderSelected() {
+  const tags = document.getElementById('selected-players-tags');
+  const form = document.getElementById('add-players-batch-form');
+  const inputs = document.getElementById('batch-player-inputs');
+  if (!tags || !form || !inputs) return;
+  const entries = Object.entries(_selectedPlayers);
+  if (entries.length === 0) {
+    tags.classList.add('hidden');
+    form.classList.add('hidden');
+    return;
+  }
+  tags.classList.remove('hidden');
+  form.classList.remove('hidden');
+  tags.innerHTML = entries.map(([uid, name]) =>
+    `<span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-blue-100 border border-blue-300 text-blue-800 text-sm font-medium">
+      ${name}
+      <button type="button" onclick="deselectPlayer('${uid}')" class="ml-1 text-blue-500 hover:text-red-500 font-bold leading-none">&times;</button>
+    </span>`
+  ).join('');
+  inputs.innerHTML = entries.map(([uid]) =>
+    `<input type="hidden" name="player_user_ids" value="${uid}">`
+  ).join('');
+}
+
+window.searchPlayers = async function(query) {
+  const resultsDiv = document.getElementById('player-search-results');
+  if (!resultsDiv) return;
+  if (query.length < 2) {
+    resultsDiv.classList.add('hidden');
+    return;
+  }
+  const existingUids = [...document.querySelectorAll('[data-player-uid]')]
+    .map(el => el.dataset.playerUid).filter(Boolean).join(',');
+  try {
+    const resp = await fetch(`/users/search?q=${encodeURIComponent(query)}&exclude=${existingUids}`);
+    const users = await resp.json();
+    if (users.length === 0) {
+      resultsDiv.innerHTML = '<div class="px-4 py-3 text-sm text-slate-500">No users found</div>';
+    } else {
+      resultsDiv.innerHTML = users.map(u => {
+        const checked = !!_selectedPlayers[u.user_id];
+        return `<label class="flex items-center gap-3 px-4 py-3 hover:bg-blue-50 cursor-pointer border-b border-blue-100 last:border-0">
+          <input type="checkbox" class="w-4 h-4 accent-blue-600" ${checked ? 'checked' : ''}
+            onchange="togglePlayer('${u.user_id}', '${u.username}', this.checked)">
+          <span class="text-blue-900 font-medium">${u.username}</span>
+        </label>`;
+      }).join('');
+    }
+    resultsDiv.classList.remove('hidden');
+  } catch(e) { console.error('Player search failed', e); }
+};
+
+window.togglePlayer = function(userId, username, checked) {
+  if (checked) {
+    _selectedPlayers[userId] = username;
+  } else {
+    delete _selectedPlayers[userId];
+  }
+  _renderSelected();
+};
+
+window.deselectPlayer = function(userId) {
+  delete _selectedPlayers[userId];
+  _renderSelected();
+  // uncheck in results if visible
+  const resultsDiv = document.getElementById('player-search-results');
+  if (resultsDiv) {
+    const cb = resultsDiv.querySelector(`input[onchange*="'${userId}'"]`);
+    if (cb) cb.checked = false;
+  }
+};
+
+// Keep for backward compat (Add Me button still uses single-player form)
+window.selectPlayer = function(userId, username) {
+  togglePlayer(userId, username, true);
+};
+
+// Hide search results when clicking outside
+document.addEventListener('click', function(e) {
+  const results = document.getElementById('player-search-results');
+  const input = document.getElementById('player-search-input');
+  if (results && input && !input.contains(e.target) && !results.contains(e.target)) {
+    results.classList.add('hidden');
+  }
+});
+
 // Pull-to-refresh
 (function () {
   let startY = 0;

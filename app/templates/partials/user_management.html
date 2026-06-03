@@ -13,13 +13,17 @@
           {{ usr.username }}
           {% if usr.is_admin %}
             <span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-rose-200 text-rose-700 font-bold">ADMIN</span>
+          {% elif usr.get('role', 'scorer') == 'player' %}
+            <span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-pink-200 text-pink-700 font-bold">👤 PLAYER</span>
+          {% else %}
+            <span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-violet-200 text-violet-700 font-bold">🎮 SCORER</span>
           {% endif %}
           {% if not usr.get('is_active', True) %}
             <span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-gray-200 text-gray-700 font-bold">INACTIVE</span>
           {% endif %}
         </div>
-        <div class="text-xs text-slate-600">
-          User ID: {{ usr.user_id }}
+        <div class="text-xs text-slate-500 mt-0.5">
+          {% if usr.email %}{{ usr.email }} &nbsp;·&nbsp;{% endif %}ID: {{ usr.user_id[:12] }}...
         </div>
       </div>
       <div class="flex gap-2">

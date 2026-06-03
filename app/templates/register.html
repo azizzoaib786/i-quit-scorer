@@ -48,6 +48,39 @@
           </div>
 
           <div>
+            <label class="block text-sm font-bold text-violet-900 mb-1">Email</label>
+            <input 
+              type="email" 
+              name="email" 
+              required 
+              class="w-full rounded-xl border-2 border-violet-200 focus:border-violet-400 focus:ring-2 focus:ring-violet-200 px-4 py-3 transition-all"
+              placeholder="your@email.com"
+            />
+          </div>
+
+          <div>
+            <label class="block text-sm font-bold text-violet-900 mb-2">I am a...</label>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="cursor-pointer">
+                <input type="radio" name="role" value="scorer" class="sr-only peer" checked />
+                <div class="rounded-xl border-2 border-violet-200 peer-checked:border-violet-500 peer-checked:bg-violet-50 p-3 text-center transition-all hover:border-violet-300">
+                  <div class="text-2xl mb-1">🎮</div>
+                  <div class="font-bold text-violet-900 text-sm">Scorer</div>
+                  <div class="text-xs text-violet-600 mt-0.5">Creates &amp; manages games</div>
+                </div>
+              </label>
+              <label class="cursor-pointer">
+                <input type="radio" name="role" value="player" class="sr-only peer" />
+                <div class="rounded-xl border-2 border-violet-200 peer-checked:border-pink-500 peer-checked:bg-pink-50 p-3 text-center transition-all hover:border-pink-300">
+                  <div class="text-2xl mb-1">👤</div>
+                  <div class="font-bold text-violet-900 text-sm">Player</div>
+                  <div class="text-xs text-violet-600 mt-0.5">Plays games, views history</div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div>
             <label class="block text-sm font-bold text-violet-900 mb-1">Password</label>
             <input 
               type="password" 

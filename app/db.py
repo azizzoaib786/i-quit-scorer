@@ -1,6 +1,6 @@
 import os
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Key, Attr
 from typing import Any, Dict, List, Optional
 
 # AWS configuration
@@ -8,11 +8,13 @@ AWS_REGION = os.getenv("AWS_REGION", "me-central-1")
 GAMES_TABLE = os.getenv("GAMES_TABLE", "iquit_games")
 EVENTS_TABLE = os.getenv("EVENTS_TABLE", "iquit_events")
 USERS_TABLE = os.getenv("USERS_TABLE", "iquit_users")
+HISTORY_TABLE = os.getenv("HISTORY_TABLE", "iquit_history")
 
 ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
 games = ddb.Table(GAMES_TABLE)
 events = ddb.Table(EVENTS_TABLE)
 users = ddb.Table(USERS_TABLE)
+history_tbl = ddb.Table(HISTORY_TABLE)
 
 
 def put_game(item: Dict[str, Any]) -> None:
@@ -66,7 +68,7 @@ def mark_event_undone(game_id: str, ts: str, undone: bool) -> None:
     )
 
 
-def create_user(user_id: str, username: str, password_hash: str, is_admin: bool = False) -> None:
+def create_user(user_id: str, username: str, password_hash: str, is_admin: bool = False, email: str = "", role: str = "scorer") -> None:
     # Create new user
     users.put_item(Item={
         "user_id": user_id,
@@ -74,6 +76,13 @@ def create_user(user_id: str, username: str, password_hash: str, is_admin: bool 
         "password_hash": password_hash,
         "is_admin": is_admin,
         "is_active": is_admin,  # Admins active by default, regular users inactive
+        "email": email,
+        "role": role,
+        "stat_rounds_played": 0,
+        "stat_rounds_won": 0,
+        "stat_games_played": 0,
+        "stat_games_won": 0,
+        "stat_total_iquits": 0,
     })
 
 
@@ -141,3 +150,73 @@ def list_all_users() -> List[Dict[str, Any]]:
 def delete_user(user_id: str) -> None:
     # Delete user (admin only)
     users.delete_item(Key={"user_id": user_id})
+
+
+def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
+    # Find user by email address
+    resp = users.scan(
+        FilterExpression=Attr("email").eq(email)
+    )
+    items = resp.get("Items", [])
+    return items[0] if items else None
+
+
+def search_users(query: str, exclude_ids: List[str] = None) -> List[Dict[str, Any]]:
+    # Search all registered users by username (case-insensitive), regardless of active status
+    exclude_ids = exclude_ids or []
+    resp = users.scan()
+    q = query.lower()
+    results = [
+        {"user_id": u["user_id"], "username": u["username"]}
+        for u in resp.get("Items", [])
+        if q in u.get("username", "").lower() and u["user_id"] not in exclude_ids
+    ]
+    return results[:10]
+
+
+def save_game_history(record: Dict[str, Any]) -> None:
+    # Write a game history record for a player
+    history_tbl.put_item(Item=record)
+
+
+def game_history_exists(user_id: str, game_id: str) -> bool:
+    # Check if ANY history record exists for this user+game (idempotency — SK is now game_id#round_id)
+    resp = history_tbl.query(
+        KeyConditionExpression=Key("user_id").eq(user_id) & Key("game_id").begins_with(game_id + "#"),
+        Limit=1
+    )
+    return len(resp.get("Items", [])) > 0
+
+
+def get_user_history(user_id: str) -> List[Dict[str, Any]]:
+    # Get all game history records for a user
+    resp = history_tbl.query(
+        KeyConditionExpression=Key("user_id").eq(user_id),
+        ScanIndexForward=False
+    )
+    return resp.get("Items", [])
+
+
+def update_user_stats(user_id: str, won: bool, iquit_count: int) -> None:
+    # Increment aggregated stats for a user after a game
+    users.update_item(
+        Key={"user_id": user_id},
+        UpdateExpression="ADD stat_games_played :one, stat_games_won :w, stat_total_iquits :iq",
+        ExpressionAttributeValues={
+            ":one": 1,
+            ":w": 1 if won else 0,
+            ":iq": iquit_count,
+        }
+    )
+
+
+def update_round_stats(user_id: str, survived: bool) -> None:
+    # Increment per-round stats for a user after each round ends
+    users.update_item(
+        Key={"user_id": user_id},
+        UpdateExpression="ADD stat_rounds_played :one, stat_rounds_won :s",
+        ExpressionAttributeValues={
+            ":one": 1,
+            ":s": 1 if survived else 0,
+        }
+    )

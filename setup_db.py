@@ -34,6 +34,29 @@ def create_users_table():
     except ddb.exceptions.ResourceInUseException:
         print("iquit_users table already exists")
 
+def create_history_table():
+    """Create the game history table"""
+    try:
+        ddb.create_table(
+            TableName="iquit_history",
+            KeySchema=[
+                {"AttributeName": "user_id", "KeyType": "HASH"},
+                {"AttributeName": "game_id", "KeyType": "RANGE"}
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "user_id", "AttributeType": "S"},
+                {"AttributeName": "game_id", "AttributeType": "S"}
+            ],
+            BillingMode="PAY_PER_REQUEST"
+        )
+        print("Created iquit_history table")
+        waiter = ddb.get_waiter('table_exists')
+        waiter.wait(TableName="iquit_history")
+        print("Table is ready")
+    except ddb.exceptions.ResourceInUseException:
+        print("iquit_history table already exists")
+
+
 def create_admin_user():
     """Create initial admin user"""
     from app.auth import hash_password
@@ -69,8 +92,9 @@ def create_admin_user():
 if __name__ == "__main__":
     print("Setting up I Quit Scoreboard database...")
     print()
-    
+
     create_users_table()
+    create_history_table()
     create_admin_user()
     
     print()

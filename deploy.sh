@@ -17,6 +17,7 @@ REPO_URL="https://github.com/YOUR_USERNAME/iquitscorer.git"  # ← update this
 AWS_REGION="eu-west-1"
 GAMES_TABLE="iquit_games"
 EVENTS_TABLE="iquit_events"
+HISTORY_TABLE="iquit_history"
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo "▶ [1/7] Installing system packages..."
@@ -53,6 +54,7 @@ WorkingDirectory=${APP_DIR}
 Environment="AWS_REGION=${AWS_REGION}"
 Environment="GAMES_TABLE=${GAMES_TABLE}"
 Environment="EVENTS_TABLE=${EVENTS_TABLE}"
+Environment="HISTORY_TABLE=${HISTORY_TABLE}"
 ExecStart=${APP_DIR}/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5

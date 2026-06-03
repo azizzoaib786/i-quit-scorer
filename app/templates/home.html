@@ -18,7 +18,7 @@
         <div class="flex items-center justify-between mb-4">
           <div class="flex items-center gap-2">
             <span class="text-2xl">👤</span>
-            <span class="font-bold text-violet-900">{{ user.username }}</span>
+            <a href="/profile/{{ user.user_id }}" class="font-bold text-violet-900 hover:text-violet-600 hover:underline">{{ user.username }}</a>
             {% if user.is_admin %}
               <span class="px-2 py-1 rounded-full text-xs font-bold bg-gradient-to-r from-rose-100 to-orange-100 text-rose-700 border border-rose-300">👑 ADMIN</span>
             {% endif %}

@@ -3,12 +3,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request, Form, HTTPException, Cookie, Response
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .db import (put_game, get_game, update_game, list_events, put_event,
-                 list_games, create_user, get_user_by_username, get_user_by_id, list_games_by_user, delete_game, update_user_password)
+                 list_games, create_user, get_user_by_username, get_user_by_id, list_games_by_user, delete_game, update_user_password,
+                 get_user_by_email, search_users, save_game_history, game_history_exists, get_user_history, update_user_stats, update_round_stats)
 from .logic import totals_by_player, per_round_scores, leaderboard, per_round_deltas
 from .auth import hash_password, verify_password, create_session_token, verify_session_token
 
@@ -80,6 +81,33 @@ def require_admin(request: Request) -> Dict[str, Any]:
     return user
 
 
+def require_scorer(request: Request) -> Dict[str, Any]:
+    # Require scorer role (blocks players)
+    user = require_auth(request)
+    if user.get("role", "scorer") == "player":
+        raise HTTPException(status_code=403, detail="Scorer access required")
+    return user
+
+
+@app.post("/profile/request-scorer", response_class=HTMLResponse)
+def request_scorer_access(request: Request):
+    # Player requests scorer role — sets role=scorer, is_active=False, pending admin activation
+    user = require_auth(request)
+    if user.get("role", "scorer") != "player":
+        raise HTTPException(400, "Only players can request scorer access")
+    from .db import toggle_user_active
+    # Set role to scorer and deactivate until admin approves
+    from boto3.dynamodb.conditions import Key as DKey
+    from .db import users as users_tbl
+    users_tbl.update_item(
+        Key={"user_id": user["user_id"]},
+        UpdateExpression="SET #r = :r, is_active = :f",
+        ExpressionAttributeNames={"#r": "role"},
+        ExpressionAttributeValues={":r": "scorer", ":f": False},
+    )
+    return RedirectResponse(f"/profile/{user['user_id']}?scorer_requested=1", status_code=303)
+
+
 def now_ts() -> str:
     # Generate unique timestamp for event ordering
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ") + "#" + uuid.uuid4().hex
@@ -131,19 +159,82 @@ def round_locked(game: Dict[str, Any], round_id: str) -> bool:
 def compute_view(game: Dict[str, Any], selected_round_id: Optional[str] = None) -> Dict[str, Any]:
     # Calculate all game stats for display
     ev = list_events(game["game_id"])
-    
+
     # Filter events to selected round only
     if selected_round_id:
         round_events = [e for e in ev if e.get("round_id") == selected_round_id]
-        totals = totals_by_player(game.get("players", []), round_events)
     else:
-        totals = totals_by_player(game.get("players", []), ev)
-    
-    board = leaderboard(game.get("players", []), totals, int(game["target"]), events=ev)
+        round_events = ev
+
+    totals = totals_by_player(game.get("players", []), round_events)
+
+    # Pass round_events so out-timestamps are consistent with the displayed totals
+    board = leaderboard(game.get("players", []), totals, int(game["target"]), events=round_events)
     round_scores = per_round_scores(ev)
     round_deltas = per_round_deltas(ev)
     is_expired = is_game_expired(game)
     return {"events": ev, "totals": totals, "board": board, "round_scores": round_scores, "round_deltas": round_deltas, "is_expired": is_expired}
+
+
+def _write_game_history(game: Dict[str, Any], board: list, round_id: str) -> None:
+    """Write history + update stats for all registered players (idempotent: stats only increment once per game)."""
+    player_ids = game.get("player_ids", {})
+    if not player_ids:
+        return
+    iquit_declarations = game.get("iquit_declarations", {})
+    date = now_ts()
+    # Score + rank for this specific round only
+    all_events = list_events(game["game_id"])
+    round_events = [e for e in all_events if e.get("round_id") == round_id]
+    round_totals = totals_by_player(game.get("players", []), round_events)
+    round_board = leaderboard(game.get("players", []), round_totals, int(game["target"]), events=round_events)
+    round_rank_map = {e["player"]: e["rank"] for e in round_board}
+    # Find round name for display
+    round_name = next((r["name"] for r in game.get("rounds", []) if r["round_id"] == round_id), "Final Round")
+    for entry in board:
+        player_name = entry["player"]
+        user_id = player_ids.get(player_name)
+        if not user_id:
+            continue
+        # won = rank 1 in THIS round (not cumulative)
+        round_rank = round_rank_map.get(player_name, 99)
+        won = round_rank == 1
+        iquit_count = int(iquit_declarations.get(player_name, 0))
+        # Only increment game stats once per game (prevent double-count if winner fires multiple times)
+        already_recorded = game_history_exists(user_id, game["game_id"])
+        save_game_history({
+            "user_id": user_id,
+            "game_id": game["game_id"] + "#" + round_id,
+            "game_name": game.get("name", "Unknown"),
+            "round_name": round_name,
+            "date": date,
+            "players": game.get("players", []),
+            "final_rank": round_rank,
+            "final_score": int(round_totals.get(player_name, 0)),
+            "iquit_count": iquit_count,
+            "won": won,
+        })
+        if not already_recorded:
+            # game-level stats use cumulative rank (who won the overall game)
+            game_won = entry["rank"] == 1
+            update_user_stats(user_id, won=game_won, iquit_count=iquit_count)
+
+
+def _write_round_stats(game: Dict[str, Any], round_id: str) -> None:
+    """Update per-round stats for all registered players after a round is locked.
+    Survived = player's score in THIS round is below target (per-round basis).
+    """
+    player_ids = game.get("player_ids", {})
+    if not player_ids:
+        return
+    # Use round-specific view to determine who survived this round
+    round_view = compute_view(game, round_id)
+    for entry in round_view["board"]:
+        user_id = player_ids.get(entry["player"])
+        if not user_id:
+            continue
+        survived = not entry["is_out"]
+        update_round_stats(user_id, survived=survived)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -152,13 +243,16 @@ def home(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
-    
+    # Players can only see their own profile
+    if user.get("role", "scorer") == "player":
+        return RedirectResponse(f"/profile/{user['user_id']}", status_code=303)
+
     # Show user's games only (admins see all)
     if user.get("is_admin"):
         recent_games = list_games(limit=50)
     else:
         recent_games = list_games_by_user(user["user_id"], limit=50)
-    
+
     return templates.TemplateResponse("home.html", {
         "request": request,
         "user": user,
@@ -194,7 +288,12 @@ async def login(request: Request, response: Response, username: str = Form(...),
     
     # Create session
     token = create_session_token(user["user_id"])
-    response = RedirectResponse("/", status_code=303)
+    # Players go straight to their profile, scorers/admins go to home
+    if user.get("role", "scorer") == "player":
+        redirect_to = f"/profile/{user['user_id']}"
+    else:
+        redirect_to = "/"
+    response = RedirectResponse(redirect_to, status_code=303)
     response.set_cookie(key="session", value=token, httponly=True, max_age=86400 * 7)
     return response
 
@@ -209,7 +308,7 @@ def register_page(request: Request):
 
 
 @app.post("/register")
-async def register(request: Request, response: Response, username: str = Form(...), password: str = Form(...)):
+async def register(request: Request, response: Response, username: str = Form(...), email: str = Form(...), password: str = Form(...), role: str = Form("scorer")):
     # Create new user
     existing_user = get_user_by_username(username)
     if existing_user:
@@ -217,15 +316,34 @@ async def register(request: Request, response: Response, username: str = Form(..
             "request": request,
             "error": "Username already exists"
         }, status_code=400)
-    
+
+    existing_email = get_user_by_email(email)
+    if existing_email:
+        return templates.TemplateResponse("register.html", {
+            "request": request,
+            "error": "Email already registered"
+        }, status_code=400)
+
+    if role not in ("scorer", "player"):
+        role = "scorer"
+
     user_id = uuid.uuid4().hex
     password_hash = hash_password(password)
-    create_user(user_id, username, password_hash, is_admin=False)
-    
-    # Show success message - user needs admin activation
+    # Players are auto-activated; scorers need admin activation
+    is_active_immediately = (role == "player")
+    create_user(user_id, username, password_hash, is_admin=False, email=email, role=role)
+    if is_active_immediately:
+        from .db import toggle_user_active
+        toggle_user_active(user_id, True)
+
+    if role == "player":
+        success_msg = "Player profile created! You can now log in and view your game history."
+    else:
+        success_msg = "Scorer account created! Contact Aziz Zoaib on +971 56 8103175 to activate your account before logging in."
+
     return templates.TemplateResponse("register.html", {
         "request": request,
-        "success": f"Account created successfully! Contact Aziz Zoaib on +971 56 8103175 to activate your account before logging in."
+        "success": success_msg
     })
     return response
 
@@ -236,6 +354,77 @@ def logout():
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie("session")
     return response
+
+
+@app.get("/users/search")
+def users_search(request: Request, q: str = "", exclude: str = ""):
+    # Search registered active users by username (typeahead)
+    require_auth(request)
+    if len(q) < 2:
+        return JSONResponse([])
+    exclude_ids = [e for e in exclude.split(",") if e]
+    results = search_users(q, exclude_ids=exclude_ids)
+    return JSONResponse(results)
+
+
+@app.get("/profile/{user_id}", response_class=HTMLResponse)
+def profile_page(request: Request, user_id: str):
+    current_user = require_auth(request)
+    profile_user = get_user_by_id(user_id)
+    if not profile_user:
+        raise HTTPException(404, "User not found")
+    game_history_raw = get_user_history(user_id)
+    game_history_raw.sort(key=lambda x: x.get("date", ""), reverse=True)
+
+    # Group rounds under each game (SK is game_id#round_id)
+    from collections import OrderedDict
+    grouped: OrderedDict = OrderedDict()
+    for h in game_history_raw:
+        sk = h.get("game_id", "")
+        pure_game_id = sk.split("#")[0]
+        if pure_game_id not in grouped:
+            grouped[pure_game_id] = {
+                "game_id": pure_game_id,
+                "game_name": h.get("game_name", "Unknown"),
+                "players": h.get("players", []),
+                "date": h.get("date", ""),
+                "won": False,
+                "rounds": [],
+            }
+        grouped[pure_game_id]["rounds"].append({
+            "round_name": h.get("round_name", ""),
+            "final_score": h.get("final_score", 0),
+            "final_rank": h.get("final_rank", 0),
+            "iquit_count": h.get("iquit_count", 0),
+            "won": h.get("won", False),
+        })
+    # Game-level won = the last round's won (decisive round wins the game)
+    for g in grouped.values():
+        g["rounds"].sort(key=lambda r: r["round_name"])
+        g["won"] = g["rounds"][-1]["won"] if g["rounds"] else False
+    game_history = list(grouped.values())
+    games_played = int(profile_user.get("stat_games_played", 0))
+    games_won = int(profile_user.get("stat_games_won", 0))
+    rounds_played = int(profile_user.get("stat_rounds_played", 0))
+    rounds_won = int(profile_user.get("stat_rounds_won", 0))
+    stats = {
+        "games_played": games_played,
+        "games_won": games_won,
+        "rounds_played": rounds_played,
+        "rounds_won": rounds_won,
+        "total_iquits": int(profile_user.get("stat_total_iquits", 0)),
+        "win_rate": round(games_won / games_played * 100) if games_played > 0 else 0,
+        "round_win_rate": round(rounds_won / rounds_played * 100) if rounds_played > 0 else 0,
+    }
+    scorer_requested = request.query_params.get("scorer_requested") == "1"
+    return templates.TemplateResponse("profile.html", {
+        "request": request,
+        "current_user": current_user,
+        "profile_user": profile_user,
+        "game_history": game_history,
+        "stats": stats,
+        "scorer_requested": scorer_requested,
+    })
 
 
 @app.get("/change-password", response_class=HTMLResponse)
@@ -389,7 +578,7 @@ async def admin_delete_user(request: Request, user_id: str):
 @app.post("/games")
 def create_game(request: Request, name: str = Form(...), target: int = Form(150)):
     # Create new game
-    user = require_auth(request)
+    user = require_scorer(request)
     game_id = uuid.uuid4().hex
     put_game({
         "game_id": game_id,
@@ -405,7 +594,7 @@ def create_game(request: Request, name: str = Form(...), target: int = Form(150)
 
 @app.get("/games/{game_id}", response_class=HTMLResponse)
 def game_page(request: Request, game_id: str, round_id: Optional[str] = None):
-    user = require_auth(request)
+    user = require_scorer(request)
     game = must_game(game_id)
     
     # Check ownership (admins can access all games)
@@ -450,47 +639,74 @@ def live_game(request: Request, game_id: str):
 
 
 @app.post("/games/{game_id}/players", response_class=HTMLResponse)
-def add_player(request: Request, game_id: str, player_name: str = Form(...)):
-    # Add player(s) to game (supports comma-separated names)
+def add_player(request: Request, game_id: str, player_user_id: str = Form(...)):
+    # Add a registered user as a player
     user, game = check_game_access(request, game_id)
-    input_names = player_name.strip()
-    if not input_names:
-        raise HTTPException(400, "Empty name")
-    
-    # Split by comma and clean up names
-    names = [n.strip() for n in input_names.split(",") if n.strip()]
-    
-    if not names:
-        raise HTTPException(400, "No valid names provided")
-    
+
+    target_user = get_user_by_id(player_user_id)
+    if not target_user:
+        raise HTTPException(400, "User not found")
+    if not target_user.get("is_active", False):
+        raise HTTPException(400, "User account is not active")
+
+    player_name = target_user["username"]
     existing_players = game.get("players", [])
-    new_players = []
-    duplicates = []
-    
-    for name in names:
-        if name in existing_players:
-            duplicates.append(name)
-        elif name not in new_players:  # Avoid duplicates in input
-            new_players.append(name)
-    
-    # Add new players
-    if new_players:
-        updated_players = existing_players + new_players
-        update_game(game_id, "SET players = :p", {":p": updated_players})
-    
+    existing_player_ids = game.get("player_ids", {})
+
+    if player_name in existing_players:
+        flash_msg = f"⚠️ {player_name} is already in the game"
+    else:
+        updated_players = existing_players + [player_name]
+        updated_player_ids = {**existing_player_ids, player_name: player_user_id}
+        update_game(game_id, "SET players = :p, player_ids = :pi", {
+            ":p": updated_players,
+            ":pi": updated_player_ids,
+        })
+        flash_msg = f"✅ Added {player_name}"
+
     game2 = must_game(game_id)
     selected = (game2["rounds"][0]["round_id"] if game2.get("rounds") else None)
     view = compute_view(game2, selected)
-    
-    # Build flash message
-    flash_msg = ""
-    if new_players:
-        flash_msg = f"✅ Added {len(new_players)} player(s): {', '.join(new_players)}"
-    if duplicates:
-        flash_msg += f" | ⚠️ Skipped duplicates: {', '.join(duplicates)}"
-    if not flash_msg:
-        flash_msg = "No players added."
-    
+    return templates.TemplateResponse("partials/round_panel.html", {
+        "request": request, "user": user, "game": game2, "selected_round_id": selected, **view,
+        "flash": flash_msg
+    })
+
+
+@app.post("/games/{game_id}/players/batch", response_class=HTMLResponse)
+async def add_players_batch(request: Request, game_id: str):
+    # Add multiple registered users as players at once
+    user, game = check_game_access(request, game_id)
+    form_data = await request.form()
+    user_ids = form_data.getlist("player_user_ids")
+    if not user_ids:
+        raise HTTPException(400, "No players selected")
+
+    existing_players = list(game.get("players", []))
+    existing_player_ids = dict(game.get("player_ids", {}))
+    added = []
+    for uid in user_ids:
+        target_user = get_user_by_id(uid)
+        if not target_user or not target_user.get("is_active", False):
+            continue
+        player_name = target_user["username"]
+        if player_name not in existing_players:
+            existing_players.append(player_name)
+            existing_player_ids[player_name] = uid
+            added.append(player_name)
+
+    if added:
+        update_game(game_id, "SET players = :p, player_ids = :pi", {
+            ":p": existing_players,
+            ":pi": existing_player_ids,
+        })
+        flash_msg = f"✅ Added: {', '.join(added)}"
+    else:
+        flash_msg = "⚠️ All selected players are already in the game"
+
+    game2 = must_game(game_id)
+    selected = (game2["rounds"][0]["round_id"] if game2.get("rounds") else None)
+    view = compute_view(game2, selected)
     return templates.TemplateResponse("partials/round_panel.html", {
         "request": request, "user": user, "game": game2, "selected_round_id": selected, **view,
         "flash": flash_msg
@@ -499,11 +715,8 @@ def add_player(request: Request, game_id: str, player_name: str = Form(...)):
 
 @app.post("/games/{game_id}/players/remove", response_class=HTMLResponse)
 def remove_player(request: Request, game_id: str, player_name: str = Form(...)):
-    # Remove player from game (admin only)
+    # Remove player from game (scorer or admin)
     user, game = check_game_access(request, game_id)
-    
-    if not user.get("is_admin"):
-        raise HTTPException(status_code=403, detail="Admin access required")
     
     name = player_name.strip()
     players = game.get("players", [])
@@ -513,7 +726,9 @@ def remove_player(request: Request, game_id: str, player_name: str = Form(...)):
     
     # Remove player from list
     players.remove(name)
-    update_game(game_id, "SET players = :p", {":p": players})
+    player_ids = game.get("player_ids", {})
+    player_ids.pop(name, None)
+    update_game(game_id, "SET players = :p, player_ids = :pi", {":p": players, ":pi": player_ids})
     
     # Delete all events for this player
     ev = list_events(game_id)
@@ -668,21 +883,33 @@ def end_round(request: Request, game_id: str, round_id: str = Form(...)):
 
     game2 = must_game(game_id)
     view = compute_view(game2, round_id)
-    
-    # Check if game is over and find winner
+
+    # Update per-round stats for every registered player after this round
+    _write_round_stats(game2, round_id)
+
+    # Winner detection is per-round
     active_players = [entry for entry in view["board"] if not entry["is_out"]]
     out_players = [entry for entry in view["board"] if entry["is_out"]]
-    
+    total_players = len(view["board"])
+
     flash_msg = "Round ended and locked."
     winner_name = None
     winner_score = None
-    
-    # Winner is the last IN player (when only 1 active player remains)
-    if len(active_players) == 1 and len(out_players) > 0:
-        flash_msg += " 🎉 Game Over! Winner declared!"
-        winner = active_players[0]
-        winner_name = winner["player"]
-        winner_score = winner["total"]
+
+    game_over = (len(active_players) == 1 and len(out_players) > 0) or \
+                (len(active_players) == 0 and total_players > 1)
+    if game_over:
+        already_declared = bool(game2.get("winner_declared", False))
+
+        if not already_declared:
+            flash_msg += " 🎉 Game Over! Winner declared!"
+            winner_entry = view["board"][0]
+            winner_name = winner_entry["player"]
+            winner_score = winner_entry["total"]
+
+        update_game(game_id, "SET winner_declared = :w", {":w": True})
+        cumulative = compute_view(game2, None)
+        _write_game_history(game2, cumulative["board"], round_id)
     
     return templates.TemplateResponse("partials/round_panel.html", {
         "request": request, "user": user, "game": game2, "selected_round_id": round_id, **view,
@@ -717,22 +944,27 @@ def add_score(request: Request, game_id: str,
 
     game2 = must_game(game_id)
     view = compute_view(game2, round_id)
-    
-    # Check if game is over and find winner
+
+    # Winner detection is per-round: a player is out when their score in THIS round hits target
     active_players = [entry for entry in view["board"] if not entry["is_out"]]
     out_players = [entry for entry in view["board"] if entry["is_out"]]
-    
+    total_players = len(view["board"])
+
     flash_msg = None
     winner_name = None
     winner_score = None
-    
-    # Winner is the last IN player (when only 1 active player remains)
-    if len(active_players) == 1 and len(out_players) > 0:
+
+    game_over = (len(active_players) == 1 and len(out_players) > 0) or \
+                (len(active_players) == 0 and total_players > 1)
+    if game_over:
         flash_msg = "🎉 Game Over! Winner is the last player standing!"
-        winner = active_players[0]
-        winner_name = winner["player"]
-        winner_score = winner["total"]
-    
+        winner_entry = view["board"][0]
+        winner_name = winner_entry["player"]
+        winner_score = winner_entry["total"]
+        update_game(game_id, "SET winner_declared = :w", {":w": True})
+        cumulative = compute_view(game2, None)
+        _write_game_history(game2, cumulative["board"], round_id)
+
     return templates.TemplateResponse("partials/round_panel.html", {
         "request": request, "user": user, "game": game2, "selected_round_id": round_id, **view,
         "flash": flash_msg,
@@ -786,21 +1018,26 @@ async def add_scores_batch(request: Request, game_id: str):
     
     game2 = must_game(game_id)
     view = compute_view(game2, round_id)
-    
-    # Check if game is over and find winner
+
+    # Winner detection is per-round: a player is out when their score in THIS round hits target
     active_players = [entry for entry in view["board"] if not entry["is_out"]]
     out_players = [entry for entry in view["board"] if entry["is_out"]]
-    
+    total_players = len(view["board"])
+
     flash_msg = None
     winner_name = None
     winner_score = None
-    
-    # Winner is the last IN player (when only 1 active player remains)
-    if len(active_players) == 1 and len(out_players) > 0:
+
+    game_over = (len(active_players) == 1 and len(out_players) > 0) or \
+                (len(active_players) == 0 and total_players > 1)
+    if game_over:
         flash_msg = "🎉 Game Over! Winner is the last player standing!"
-        winner = active_players[0]
-        winner_name = winner["player"]
-        winner_score = winner["total"]
+        winner_entry = view["board"][0]
+        winner_name = winner_entry["player"]
+        winner_score = winner_entry["total"]
+        update_game(game_id, "SET winner_declared = :w", {":w": True})
+        cumulative = compute_view(game2, None)
+        _write_game_history(game2, cumulative["board"], round_id)
     elif added_count > 0:
         flash_msg = f"✅ Added scores for {added_count} player(s)"
     

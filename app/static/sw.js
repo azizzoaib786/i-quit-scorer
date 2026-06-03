@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iquit-v1';
+const CACHE_NAME = 'iquit-v4';
 const STATIC_ASSETS = [
   '/',
   '/static/app.js',
