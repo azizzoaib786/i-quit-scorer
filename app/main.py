@@ -537,6 +537,25 @@ async def admin_toggle_user(request: Request, user_id: str):
     })
 
 
+@app.post("/admin/users/{user_id}/revert-to-player")
+async def admin_revert_to_player(request: Request, user_id: str):
+    # Revert a scorer (pending activation) back to player and re-activate them
+    require_admin(request)
+    from .db import users as users_tbl
+    users_tbl.update_item(
+        Key={"user_id": user_id},
+        UpdateExpression="SET #r = :r, is_active = :a",
+        ExpressionAttributeNames={"#r": "role"},
+        ExpressionAttributeValues={":r": "player", ":a": True},
+    )
+    from .db import list_all_users
+    all_users = list_all_users()
+    return templates.TemplateResponse("partials/user_management.html", {
+        "request": request,
+        "all_users": all_users
+    })
+
+
 @app.delete("/admin/users/{user_id}")
 async def admin_delete_user(request: Request, user_id: str):
     # Delete user (admin only)

@@ -26,8 +26,20 @@
           {% if usr.email %}{{ usr.email }} &nbsp;·&nbsp;{% endif %}ID: {{ usr.user_id[:12] }}...
         </div>
       </div>
-      <div class="flex gap-2">
+      <div class="flex gap-2 flex-wrap justify-end">
         {% if not usr.is_admin %}
+        {% if usr.get('role', 'scorer') == 'scorer' and not usr.get('is_active', True) and not usr.is_admin %}
+        <form
+          hx-post="/admin/users/{{ usr.user_id }}/revert-to-player"
+          hx-target="#user-management"
+          hx-swap="outerHTML"
+          hx-confirm="Revert {{ usr.username }} back to Player? They will be re-activated."
+        >
+          <button type="submit" class="px-3 py-2 rounded-lg text-white text-sm font-bold shadow-md hover:shadow-lg transition-all bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600">
+            👤 Revert to Player
+          </button>
+        </form>
+        {% endif %}
         <form
           hx-post="/admin/users/{{ usr.user_id }}/toggle-active"
           hx-target="#user-management"
