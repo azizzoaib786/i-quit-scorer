@@ -1,109 +1,130 @@
 #!/bin/bash
 # =============================================================================
-# IQuit Scoreboard — EC2 Amazon Linux Deployment Script
-# Usage: bash deploy.sh
-# Run this once on a fresh EC2 Amazon Linux 2/2023 instance.
+# iquitscorer — EC2 deploy / redeploy script
+# Deploys FastAPI app at https://52patta.azizzoaib.com
+# Idempotent — safe to re-run.
+#
+# Prerequisites on the EC2:
+#   - python3, pip, nginx, certbot, python3-certbot-nginx, git
+#     (installed by Terraform user_data in zizabot/terraform/ec2)
+#   - Ports 80/443 open in the security group
+#   - DNS A record for 52patta.azizzoaib.com → this EC2's public IP
 # =============================================================================
-
 set -euo pipefail
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────────────────────
 APP_DIR="/home/ec2-user/iquitscorer"
 APP_USER="ec2-user"
 SERVICE_NAME="iquitscorer"
-REPO_URL="https://github.com/YOUR_USERNAME/iquitscorer.git"  # ← update this
+APP_PORT="8000"
+REPO_URL="${REPO_URL:-https://github.com/azizzoaib78/iquitscorer.git}"
 
-# AWS / App env vars
+DOMAIN="52patta.azizzoaib.com"
+CERTBOT_EMAIL="aziz@azizzoaib.com"
+
 AWS_REGION="eu-west-1"
 GAMES_TABLE="iquit_games"
 EVENTS_TABLE="iquit_events"
 HISTORY_TABLE="iquit_history"
+
+# SECRET_KEY persists across deploys — generated once, chmod 600.
+SECRET_FILE="/etc/iquitscorer.env"
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "▶ [1/7] Installing system packages..."
-if command -v dnf &>/dev/null; then
-    sudo dnf update -y
-    sudo dnf install -y python3-pip python3 nginx certbot python3-certbot-nginx git
+echo "▶ [1/7] Sanity check tools..."
+for bin in python3 pip3 nginx certbot git; do
+    command -v "$bin" >/dev/null || { echo "❌ Missing $bin — run Terraform user_data first."; exit 1; }
+done
+
+echo "▶ [2/7] Provision SECRET_KEY (only on first run)..."
+if [ ! -f "$SECRET_FILE" ]; then
+    sudo bash -c "echo SECRET_KEY=$(openssl rand -hex 32) > $SECRET_FILE"
+    sudo chmod 600 "$SECRET_FILE"
+    echo "   Created $SECRET_FILE"
 else
-    sudo yum update -y
-    sudo yum install -y python3-pip python3 nginx certbot python3-certbot-nginx git
+    echo "   $SECRET_FILE exists — leaving as-is"
 fi
 
-echo "▶ [2/7] Cloning / updating repo..."
+echo "▶ [3/7] Clone or pull repo..."
 if [ -d "$APP_DIR/.git" ]; then
-    echo "   Repo exists, pulling latest..."
-    git -C "$APP_DIR" pull
+    git -C "$APP_DIR" fetch --all
+    git -C "$APP_DIR" reset --hard origin/HEAD
 else
-    git clone "$REPO_URL" "$APP_DIR"
+    sudo -u "$APP_USER" git clone "$REPO_URL" "$APP_DIR"
 fi
+sudo chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
-echo "▶ [3/7] Setting up Python venv and installing dependencies..."
-python3 -m venv "$APP_DIR/.venv"
-"$APP_DIR/.venv/bin/pip" install --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+echo "▶ [4/7] Python venv + deps..."
+sudo -u "$APP_USER" bash -c "
+    python3 -m venv '$APP_DIR/.venv'
+    '$APP_DIR/.venv/bin/pip' install --upgrade pip
+    '$APP_DIR/.venv/bin/pip' install -r '$APP_DIR/requirements.txt'
+"
 
-echo "▶ [4/7] Creating systemd service..."
-sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<EOF
+echo "▶ [5/7] systemd service..."
+sudo tee "/etc/systemd/system/${SERVICE_NAME}.service" > /dev/null <<EOF
 [Unit]
-Description=IQuit Scoreboard
+Description=IQuit Scoreboard (FastAPI)
 After=network.target
 
 [Service]
 User=${APP_USER}
 WorkingDirectory=${APP_DIR}
+EnvironmentFile=${SECRET_FILE}
 Environment="AWS_REGION=${AWS_REGION}"
 Environment="GAMES_TABLE=${GAMES_TABLE}"
 Environment="EVENTS_TABLE=${EVENTS_TABLE}"
 Environment="HISTORY_TABLE=${HISTORY_TABLE}"
-ExecStart=${APP_DIR}/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=${APP_DIR}/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port ${APP_PORT}
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"
-echo "   Service status:"
-sudo systemctl status "$SERVICE_NAME" --no-pager
 
-echo "▶ [5/7] Configuring Nginx..."
-sudo tee /etc/nginx/conf.d/${SERVICE_NAME}.conf > /dev/null <<'EOF'
+echo "▶ [6/7] nginx vhost for ${DOMAIN}..."
+sudo tee "/etc/nginx/conf.d/${SERVICE_NAME}.conf" > /dev/null <<EOF
 server {
     listen 80;
-    server_name _;
+    server_name ${DOMAIN};
+
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 120s;
     }
 }
 EOF
-
-sudo systemctl enable nginx
-sudo systemctl start nginx
+sudo mkdir -p /var/www/certbot
 sudo nginx -t && sudo systemctl reload nginx
 
-echo "▶ [6/7] Setting up DynamoDB tables..."
-"$APP_DIR/.venv/bin/python" "$APP_DIR/setup_db.py"
+echo "▶ [7/7] Let's Encrypt cert for ${DOMAIN}..."
+if sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$CERTBOT_EMAIL" --redirect; then
+    echo "   ✅ HTTPS configured."
+else
+    echo "   ⚠️  Certbot failed — verify DNS + firewall, then run:"
+    echo "       sudo certbot --nginx -d $DOMAIN -m $CERTBOT_EMAIL --agree-tos --redirect"
+fi
+
+echo "▶ Bootstrapping DynamoDB tables (idempotent)..."
+sudo -u "$APP_USER" AWS_REGION="$AWS_REGION" \
+    GAMES_TABLE="$GAMES_TABLE" EVENTS_TABLE="$EVENTS_TABLE" HISTORY_TABLE="$HISTORY_TABLE" \
+    "$APP_DIR/.venv/bin/python" "$APP_DIR/setup_db.py" || true
 
 echo ""
-echo "✅ Deployment complete!"
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  App is running at: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"
-echo ""
-echo "  To enable SSL (requires a domain name pointing to this IP):"
-echo "    sudo certbot --nginx -d your-domain.com"
-echo "    sudo systemctl enable certbot-renew.timer"
-echo ""
-echo "  Useful commands:"
-echo "    sudo systemctl status $SERVICE_NAME"
-echo "    sudo journalctl -u $SERVICE_NAME -f"
-echo "    sudo systemctl restart $SERVICE_NAME"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ iquitscorer deployed."
+echo "   Live at:  https://${DOMAIN}"
+echo "   Logs:     sudo journalctl -u ${SERVICE_NAME} -f"
+echo "   Restart:  sudo systemctl restart ${SERVICE_NAME}"
