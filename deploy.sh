@@ -17,7 +17,7 @@ APP_DIR="/home/ec2-user/iquitscorer"
 APP_USER="ec2-user"
 SERVICE_NAME="iquitscorer"
 APP_PORT="8000"
-REPO_URL="${REPO_URL:-https://github.com/azizzoaib78/iquitscorer.git}"
+REPO_URL="${REPO_URL:-git@github.com:azizzoaib786/i-quit-scorer.git}"
 
 DOMAIN="52patta.azizzoaib.com"
 CERTBOT_EMAIL="aziz@azizzoaib.com"
