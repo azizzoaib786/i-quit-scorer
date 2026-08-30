@@ -7,8 +7,8 @@
 
 set -euo pipefail
 
-APP_DIR="/home/ec2-user/iquitscorer"
-SERVICE_NAME="iquitscorer"
+APP_DIR="/home/ec2-user/i-quit-scorer"
+SERVICE_NAME="i-quit-scorer"
 REPO_URL="${REPO_URL:-git@github.com:azizzoaib786/i-quit-scorer.git}"
 
 echo "▶ Pulling latest changes..."

@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# iquitscorer — EC2 deploy / redeploy script
+# i-quit-scorer — EC2 deploy / redeploy script
 # Deploys FastAPI app at https://52patta.azizzoaib.com
 # Idempotent — safe to re-run.
 #
@@ -13,9 +13,9 @@
 set -euo pipefail
 
 # ── Config ───────────────────────────────────────────────────────────────────
-APP_DIR="/home/ec2-user/iquitscorer"
+APP_DIR="/home/ec2-user/i-quit-scorer"
 APP_USER="ec2-user"
-SERVICE_NAME="iquitscorer"
+SERVICE_NAME="i-quit-scorer"
 APP_PORT="8000"
 REPO_URL="${REPO_URL:-git@github.com:azizzoaib786/i-quit-scorer.git}"
 
@@ -28,7 +28,7 @@ EVENTS_TABLE="iquit_events"
 HISTORY_TABLE="iquit_history"
 
 # SECRET_KEY persists across deploys — generated once, chmod 600.
-SECRET_FILE="/etc/iquitscorer.env"
+SECRET_FILE="/etc/i-quit-scorer.env"
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo "▶ [1/7] Sanity check tools..."
@@ -124,7 +124,7 @@ sudo -u "$APP_USER" AWS_REGION="$AWS_REGION" \
     "$APP_DIR/.venv/bin/python" "$APP_DIR/setup_db.py" || true
 
 echo ""
-echo "✅ iquitscorer deployed."
+echo "✅ i-quit-scorer deployed."
 echo "   Live at:  https://${DOMAIN}"
 echo "   Logs:     sudo journalctl -u ${SERVICE_NAME} -f"
 echo "   Restart:  sudo systemctl restart ${SERVICE_NAME}"
