@@ -39,13 +39,19 @@
 
             {% set active_count = board | selectattr('is_out', 'false') | list | length %}
             {% set total_count = board | length %}
-            <div class="mb-3 flex items-center gap-2">
+            {% set total_iquits = game.get('iquit_declarations', {}).values() | sum %}
+            <div class="mb-3 flex flex-wrap items-center gap-2">
               <span class="px-3 py-1 rounded-full text-xs font-bold bg-gradient-to-r from-emerald-100 to-teal-100 text-emerald-700 border-2 border-emerald-300">
                 ✅ {{ active_count }} Active
               </span>
               <span class="px-3 py-1 rounded-full text-xs font-bold bg-gradient-to-r from-rose-100 to-orange-100 text-rose-700 border-2 border-rose-300">
                 ❌ {{ total_count - active_count }} Out
               </span>
+              {% if total_iquits > 0 %}
+              <span class="px-3 py-1 rounded-full text-xs font-bold bg-gradient-to-r from-purple-100 to-fuchsia-100 text-purple-700 border-2 border-purple-300">
+                🎲 {{ total_iquits }} I QUIT{{ 'S' if total_iquits > 1 else '' }} total
+              </span>
+              {% endif %}
             </div>
 
             <div class="overflow-hidden rounded-xl border-2 border-amber-200 shadow-md">
@@ -129,7 +135,13 @@
                   {% for p in game.players %}
                   <div class="flex items-center justify-between gap-2 rounded-xl border-2 border-emerald-200 bg-white/60 backdrop-blur-sm p-3 shadow-sm">
                     <div class="flex-1">
-                      <div class="font-bold text-slate-800">{{ p }}</div>
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class="font-bold text-slate-800">{{ p }}</span>
+                        {% set iquit_count = game.get('iquit_declarations', {}).get(p, 0) %}
+                        {% if iquit_count > 0 %}
+                          <span class="text-xs px-2 py-0.5 rounded-full bg-purple-200 text-purple-700 font-bold">🎲 {{ iquit_count }} I QUIT{{ 'S' if iquit_count > 1 else '' }}</span>
+                        {% endif %}
+                      </div>
                       <div class="text-xs text-emerald-700 font-medium">
                         {% set deltas = round_deltas.get(r.round_id, {}).get(p, []) %}
                         {% if deltas is defined and deltas|length > 0 %}
