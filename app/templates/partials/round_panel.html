@@ -217,35 +217,26 @@
     </form>
     {% endif %}
 
-    <!-- Multi-select player search -->
-    <div>
-      <input
-        type="text"
-        id="player-search-input"
-        oninput="searchPlayers(this.value)"
-        autocomplete="off"
-        placeholder="Search players to add..."
-        class="w-full rounded-xl border-2 border-blue-200 focus:border-blue-400 focus:ring-2 focus:ring-blue-200 px-4 py-3 text-lg transition-all"
-      />
-      <!-- Search results as checkboxes -->
-      <div id="player-search-results" class="hidden mt-2 rounded-xl border-2 border-blue-200 bg-white shadow-lg max-h-52 overflow-y-auto"></div>
-    </div>
-
-    <!-- Selected players tags -->
-    <div id="selected-players-tags" class="flex flex-wrap gap-2 hidden"></div>
-
-    <!-- Batch add form -->
+    <!-- Add players by free-text name(s) — comma-separated for bulk add -->
     <form
-      id="add-players-batch-form"
-      hx-post="/games/{{ game.game_id }}/players/batch"
+      hx-post="/games/{{ game.game_id }}/players/name"
       hx-target="#round-panel"
       hx-swap="outerHTML"
-      class="hidden"
+      hx-on::after-request="if(event.detail.successful){ this.reset(); }"
+      class="space-y-2"
     >
-      <div id="batch-player-inputs"></div>
+      <input
+        type="text"
+        name="player_name"
+        required
+        autocomplete="off"
+        placeholder="Alice, Bob, Charlie…"
+        class="w-full rounded-xl border-2 border-blue-200 focus:border-blue-400 focus:ring-2 focus:ring-blue-200 px-4 py-3 transition-all"
+      />
+      <p class="text-xs text-blue-700">Type one name or many separated by commas — all will be added at once.</p>
       <button type="submit"
-        class="w-full rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-4 py-3 font-semibold shadow-md hover:shadow-lg transition-all">
-        ➕ Add Selected Players
+        class="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white px-4 py-3 font-bold shadow-md hover:shadow-lg transition-all">
+        ➕ Add players
       </button>
     </form>
 

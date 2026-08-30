@@ -25,7 +25,7 @@
             </div>
             <p class="text-violet-700 font-medium">Target: <b class="text-pink-600">{{ game.target }}</b> <span class="text-sm">(total ≥ target = OUT)</span></p>
             <div class="mt-2 flex items-center gap-2">
-              <input type="text" readonly value="https://52patta.duckdns.org/live/{{ game.game_id }}" id="liveLink" class="flex-1 text-xs px-2 py-1 bg-white border border-violet-300 rounded-lg font-mono text-violet-700">
+              <input type="text" readonly value="{{ request.url_for('live_game', game_id=game.game_id) }}" id="liveLink" class="flex-1 text-xs px-2 py-1 bg-white border border-violet-300 rounded-lg font-mono text-violet-700">
               <button onclick="navigator.clipboard.writeText(document.getElementById('liveLink').value); this.innerText='✓ Copied!'; setTimeout(()=>this.innerText='📋 Copy', 2000)" class="px-3 py-1 text-xs font-bold bg-gradient-to-r from-violet-500 to-pink-500 text-white rounded-lg hover:shadow-lg transition-all">📋 Copy</button>
             </div>
           </div>

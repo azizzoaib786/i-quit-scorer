@@ -75,7 +75,7 @@ Environment="AWS_REGION=${AWS_REGION}"
 Environment="GAMES_TABLE=${GAMES_TABLE}"
 Environment="EVENTS_TABLE=${EVENTS_TABLE}"
 Environment="HISTORY_TABLE=${HISTORY_TABLE}"
-ExecStart=${APP_DIR}/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port ${APP_PORT}
+ExecStart=${APP_DIR}/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port ${APP_PORT} --proxy-headers --forwarded-allow-ips="127.0.0.1"
 Restart=always
 RestartSec=5
 

@@ -156,6 +156,22 @@ def round_locked(game: Dict[str, Any], round_id: str) -> bool:
     raise HTTPException(status_code=404, detail="Round not found")
 
 
+def default_round_id(game: Dict[str, Any]) -> Optional[str]:
+    # Pick the round to show when the user hasn't explicitly chosen one
+    # (page refresh, spectator link, or after a player-list update).
+    # Rounds are appended in chronological order, so the newest is last.
+    # Prefer the most-recent *unlocked* round (the one scoring is happening
+    # in). If every round is locked, fall back to the newest overall so a
+    # completed game still shows its final round instead of round 1.
+    rounds = game.get("rounds") or []
+    if not rounds:
+        return None
+    for r in reversed(rounds):
+        if not r.get("locked"):
+            return r["round_id"]
+    return rounds[-1]["round_id"]
+
+
 def compute_view(game: Dict[str, Any], selected_round_id: Optional[str] = None) -> Dict[str, Any]:
     # Calculate all game stats for display
     ev = list_events(game["game_id"])
@@ -308,8 +324,10 @@ def register_page(request: Request):
 
 
 @app.post("/register")
-async def register(request: Request, response: Response, username: str = Form(...), email: str = Form(...), password: str = Form(...), role: str = Form("scorer")):
-    # Create new user
+async def register(request: Request, response: Response, username: str = Form(...), email: str = Form(...), password: str = Form(...)):
+    # Create new scorer account. Player self-registration has been removed —
+    # players are added as free-text names by a scorer during a game and do
+    # not need their own login.
     existing_user = get_user_by_username(username)
     if existing_user:
         return templates.TemplateResponse("register.html", {
@@ -324,22 +342,12 @@ async def register(request: Request, response: Response, username: str = Form(..
             "error": "Email already registered"
         }, status_code=400)
 
-    if role not in ("scorer", "player"):
-        role = "scorer"
-
     user_id = uuid.uuid4().hex
     password_hash = hash_password(password)
-    # Players are auto-activated; scorers need admin activation
-    is_active_immediately = (role == "player")
-    create_user(user_id, username, password_hash, is_admin=False, email=email, role=role)
-    if is_active_immediately:
-        from .db import toggle_user_active
-        toggle_user_active(user_id, True)
+    # Scorers always need admin activation before they can log in.
+    create_user(user_id, username, password_hash, is_admin=False, email=email, role="scorer")
 
-    if role == "player":
-        success_msg = "Player profile created! You can now log in and view your game history."
-    else:
-        success_msg = "Scorer account created! Contact Aziz Zoaib on +971 56 8103175 to activate your account before logging in."
+    success_msg = "Scorer account created! Contact Aziz Zoaib on +971 56 8103175 to activate your account before logging in."
 
     return templates.TemplateResponse("register.html", {
         "request": request,
@@ -640,9 +648,7 @@ def game_page(request: Request, game_id: str, round_id: Optional[str] = None):
     if not user.get("is_admin") and game.get("user_id") != user["user_id"]:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    selected_round_id = round_id
-    if not selected_round_id and game.get("rounds"):
-        selected_round_id = game["rounds"][0]["round_id"]
+    selected_round_id = round_id or default_round_id(game)
 
     view = compute_view(game, selected_round_id)
 
@@ -663,9 +669,7 @@ def live_game(request: Request, game_id: str):
     # Get round_id from query parameter
     round_id = request.query_params.get("round_id")
     
-    selected_round_id = round_id
-    if not selected_round_id and game.get("rounds"):
-        selected_round_id = game["rounds"][0]["round_id"]
+    selected_round_id = round_id or default_round_id(game)
 
     view = compute_view(game, selected_round_id)
 
@@ -704,7 +708,58 @@ def add_player(request: Request, game_id: str, player_user_id: str = Form(...)):
         flash_msg = f"✅ Added {player_name}"
 
     game2 = must_game(game_id)
-    selected = (game2["rounds"][0]["round_id"] if game2.get("rounds") else None)
+    selected = default_round_id(game2)
+    view = compute_view(game2, selected)
+    return templates.TemplateResponse("partials/round_panel.html", {
+        "request": request, "user": user, "game": game2, "selected_round_id": selected, **view,
+        "flash": flash_msg
+    })
+
+
+@app.post("/games/{game_id}/players/name", response_class=HTMLResponse)
+def add_player_by_name(request: Request, game_id: str, player_name: str = Form(...)):
+    # Add one or more free-text players by name (no login / registration
+    # required). Accepts a comma-, newline-, or semicolon-separated list so
+    # a scorer can paste an entire roster in one submit. Names are stored
+    # as-is; they do not appear in `player_ids` because there is no linked
+    # user account. Case-insensitive dedupe against existing players and
+    # within the incoming batch itself.
+    user, game = check_game_access(request, game_id)
+
+    raw = (player_name or "").replace(";", ",").replace("\n", ",")
+    incoming = [n.strip() for n in raw.split(",") if n.strip()]
+    if not incoming:
+        raise HTTPException(400, "Player name required")
+
+    existing_players = list(game.get("players", []))
+    lowered = {p.lower() for p in existing_players}
+    added, skipped_dupe, skipped_long = [], [], []
+    for name in incoming:
+        if len(name) > 40:
+            skipped_long.append(name[:20] + "…")
+            continue
+        key = name.lower()
+        if key in lowered:
+            skipped_dupe.append(name)
+            continue
+        lowered.add(key)
+        existing_players.append(name)
+        added.append(name)
+
+    if added:
+        update_game(game_id, "SET players = :p", {":p": existing_players})
+
+    parts = []
+    if added:
+        parts.append(f"✅ Added {len(added)}: {', '.join(added[:6])}{'…' if len(added) > 6 else ''}")
+    if skipped_dupe:
+        parts.append(f"⚠️ Skipped {len(skipped_dupe)} already in game")
+    if skipped_long:
+        parts.append(f"⚠️ Skipped {len(skipped_long)} over 40 chars")
+    flash_msg = " • ".join(parts) or "No players added"
+
+    game2 = must_game(game_id)
+    selected = default_round_id(game2)
     view = compute_view(game2, selected)
     return templates.TemplateResponse("partials/round_panel.html", {
         "request": request, "user": user, "game": game2, "selected_round_id": selected, **view,
@@ -744,7 +799,7 @@ async def add_players_batch(request: Request, game_id: str):
         flash_msg = "⚠️ All selected players are already in the game"
 
     game2 = must_game(game_id)
-    selected = (game2["rounds"][0]["round_id"] if game2.get("rounds") else None)
+    selected = default_round_id(game2)
     view = compute_view(game2, selected)
     return templates.TemplateResponse("partials/round_panel.html", {
         "request": request, "user": user, "game": game2, "selected_round_id": selected, **view,
@@ -777,7 +832,7 @@ def remove_player(request: Request, game_id: str, player_name: str = Form(...)):
             events.delete_item(Key={"game_id": game_id, "ts": e["ts"]})
     
     game2 = must_game(game_id)
-    selected = (game2["rounds"][0]["round_id"] if game2.get("rounds") else None)
+    selected = default_round_id(game2)
     view = compute_view(game2, selected)
     return templates.TemplateResponse("partials/round_panel.html", {
         "request": request, "user": user, "game": game2, "selected_round_id": selected, **view,
@@ -800,9 +855,7 @@ def declare_iquit(request: Request, game_id: str, player_name: str):
     update_game(game_id, "SET iquit_declarations = :iq", {":iq": iquit_declarations})
     
     game2 = must_game(game_id)
-    selected = request.query_params.get("round_id")
-    if not selected and game2.get("rounds"):
-        selected = game2["rounds"][0]["round_id"]
+    selected = request.query_params.get("round_id") or default_round_id(game2)
     
     view = compute_view(game2, selected)
     return templates.TemplateResponse("partials/round_panel.html", {
@@ -895,7 +948,7 @@ def delete_round(request: Request, game_id: str, round_id: str):
     
     # Reload game and select first round if available
     game2 = must_game(game_id)
-    selected = (game2["rounds"][0]["round_id"] if game2.get("rounds") else None)
+    selected = default_round_id(game2)
     view = compute_view(game2, selected)
     
     return templates.TemplateResponse("partials/round_panel.html", {
