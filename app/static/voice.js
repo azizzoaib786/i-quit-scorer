@@ -81,52 +81,90 @@
   }
 
   // Split an utterance into (player, delta, confidence) tuples.
+  //
+  // Strategy: walk tokens left-to-right. At each position, try to match
+  // a known player as a 1-3 token window (longest first). If a name
+  // matches with confidence >= 0.6, consume optional "minus"/"negative"
+  // and then the longest number that parses (1-4 tokens). Emit the
+  // tuple and continue from just past the number. If no name matches
+  // at the current position, advance by one token.
+  //
+  // This handles unpunctuated speech like
+  //   "MK 10 Aziz 10 Ali 25 Hatim"    -> 3 tuples (Hatim has no score)
+  //   "Sara minus five and Bob twenty" -> 2 tuples
+  //   "Ali one hundred and ten"        -> Ali +110
   function parseUtterance(text, players) {
-    const cleaned = text
+    const cleaned = String(text)
       .toLowerCase()
-      .replace(/[.!?]/g, '')
-      .replace(/\bplus\b/g, '')
-      .replace(/\s+and\s+/g, ',')
-      .replace(/;|\n/g, ',');
-    const entries = cleaned.split(',').map(s => s.trim()).filter(Boolean);
+      .replace(/[.!?,;:()]/g, ' ')
+      .replace(/\bplus\b/g, ' ')
+      // Split glued alphanumerics: "mk10" -> "mk 10", "10ali" -> "10 ali"
+      .replace(/([a-z])(\d)/g, '$1 $2')
+      .replace(/(\d)([a-z])/g, '$1 $2')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const tokens = cleaned.split(' ').filter(Boolean);
     const out = [];
-    for (const entry of entries) {
-      const tokens = entry.split(/\s+/).filter(Boolean);
-      if (tokens.length < 2) continue;
-
-      // Grab the tail as the number (try 1..4 tokens).
-      let numTokens = [];
-      let nameTokens = tokens.slice();
-      for (let take = 1; take <= 4 && take < tokens.length; take++) {
-        const slice = tokens.slice(tokens.length - take);
-        const n = parseNumberWords(slice);
-        if (n !== null) {
-          numTokens = slice;
-          nameTokens = tokens.slice(0, tokens.length - take);
+    const NAME_CONF = 0.6;
+    let i = 0;
+    while (i < tokens.length) {
+      // Longest-first name match at this position.
+      let matched = null;
+      const maxName = Math.min(3, tokens.length - i);
+      for (let nameLen = maxName; nameLen >= 1; nameLen--) {
+        const candidateTokens = tokens.slice(i, i + nameLen);
+        // A player name never contains a digit / number-word / negative
+        // marker. Reject candidates like "aziz 10" or "twenty ali" which
+        // would otherwise fuzzy-match a real name and swallow the number.
+        const bad = candidateTokens.some(t =>
+          /^-?\d+$/.test(t) || NUM_WORDS[t] !== undefined || NEG_WORDS.has(t));
+        if (bad) continue;
+        const candidate = candidateTokens.join(' ');
+        const m = bestNameMatch(candidate, players);
+        if (m.player && m.score >= NAME_CONF) {
+          matched = { name: m.player, score: m.score, nameLen, spoken: candidate };
+          break;
         }
       }
-      if (numTokens.length === 0) continue;
+      if (!matched) { i++; continue; }
 
-      // Negative word can appear immediately before the number.
+      // Optional negative marker between name and number.
+      let j = i + matched.nameLen;
       let negative = false;
-      if (nameTokens.length && NEG_WORDS.has(nameTokens[nameTokens.length - 1])) {
+      if (j < tokens.length && NEG_WORDS.has(tokens[j])) {
         negative = true;
-        nameTokens = nameTokens.slice(0, -1);
+        j++;
       }
-      if (nameTokens.length === 0) continue;
 
-      const num = parseNumberWords(numTokens);
-      if (num === null) continue;
-
-      const spokenName = nameTokens.join(' ');
-      const match = bestNameMatch(spokenName, players);
-      const delta = negative ? -num : num;
-
-      if (!match.player || match.score < 0.5) {
-        out.push({ player: null, delta, confidence: 0, spoken: spokenName });
-      } else {
-        out.push({ player: match.player, delta, confidence: match.score, spoken: spokenName });
+      // Longest-first number match starting at j.
+      let num = null;
+      let numLen = 0;
+      const maxNum = Math.min(4, tokens.length - j);
+      for (let take = maxNum; take >= 1; take--) {
+        const slice = tokens.slice(j, j + take);
+        const n = parseNumberWords(slice);
+        if (n !== null) { num = n; numLen = take; break; }
       }
+      if (num === null) {
+        // Name matched but no score followed — record as unmatched-name
+        // so the scorer sees it in the preview, then move on.
+        out.push({
+          player: null,
+          delta: 0,
+          confidence: 0,
+          spoken: matched.spoken + ' (no score)'
+        });
+        i = j;
+        continue;
+      }
+
+      out.push({
+        player: matched.name,
+        delta: negative ? -num : num,
+        confidence: matched.score,
+        spoken: matched.spoken
+      });
+      i = j + numLen;
     }
     return out;
   }
@@ -180,13 +218,15 @@
       }
       const lines = results.map(r => {
         const sign = r.delta > 0 ? '+' : '';
+        if (r.player === null && r.confidence === 0 && r.delta === 0 && / \(no score\)$/.test(r.spoken)) {
+          const name = r.spoken.replace(/ \(no score\)$/, '');
+          return `<div class="text-amber-800">⚠️ Heard <b>${name}</b> but no score followed — skipped.</div>`;
+        }
         if (!r.player) {
           return `<div class="text-rose-700">❓ "${r.spoken}" → no player matched (${sign}${r.delta} ignored)</div>`;
         }
         const conf = Math.round(r.confidence * 100);
-        const cls = conf >= 80
-          ? 'text-emerald-800'
-          : 'text-amber-800';
+        const cls = conf >= 80 ? 'text-emerald-800' : 'text-amber-800';
         const confCls = conf >= 80 ? 'text-emerald-600' : 'text-amber-600';
         return `<div class="${cls}">✅ <b>${r.player}</b> ${sign}${r.delta} <span class="${confCls}">(${conf}% match)</span></div>`;
       });
@@ -206,32 +246,74 @@
       }
     };
 
+    // Accumulated results across a single "listening" session, keyed
+    // by player. Later utterances for the same player overwrite.
+    let accumulated = new Map(); // player -> {delta, confidence, spoken}
+    let unmatched = [];          // {spoken, delta}
+    let finalTranscript = '';
+
+    const rebuildPreview = () => {
+      const results = [];
+      for (const [player, r] of accumulated) {
+        results.push({ player, delta: r.delta, confidence: r.confidence, spoken: r.spoken });
+      }
+      results.push(...unmatched);
+      renderPreview(results);
+    };
+
+    const applySegment = (segText) => {
+      const results = parseUtterance(segText, players);
+      for (const r of results) {
+        if (r.player) {
+          accumulated.set(r.player, { delta: r.delta, confidence: r.confidence, spoken: r.spoken });
+        } else {
+          unmatched.push(r);
+        }
+      }
+      rebuildPreview();
+    };
+
     recognition = new SR();
     recognition.lang = navigator.language || 'en-US';
-    recognition.continuous = false;
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
+
+    let userWantsListening = false;
 
     recognition.onstart = () => {
       listening = true;
       btn.classList.add('animate-pulse', 'ring-4', 'ring-purple-300');
       if (label) label.textContent = '🔴 Listening… (tap to stop)';
-      setTranscript('…');
-      if (previewEl) previewEl.classList.add('hidden');
+      if (finalTranscript === '') setTranscript('Say a player and score, pause, then the next…');
     };
 
     recognition.onresult = (event) => {
-      let interim = '', final = '';
+      let interim = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const t = event.results[i][0].transcript;
-        if (event.results[i].isFinal) final += t;
-        else interim += t;
+        const seg = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          const trimmed = seg.trim();
+          if (trimmed) {
+            finalTranscript = (finalTranscript ? finalTranscript + ' • ' : '') + trimmed;
+            applySegment(trimmed);
+          }
+        } else {
+          interim += seg;
+        }
       }
-      setTranscript((final || interim || '').trim() || '…');
+      const display = (finalTranscript + (interim ? '  |  ' + interim.trim() : '')).trim();
+      setTranscript(display || '…');
     };
 
     recognition.onerror = (event) => {
+      // "no-speech" fires often in continuous mode; just restart silently.
+      if (event.error === 'no-speech' && userWantsListening) {
+        try { recognition.stop(); } catch (e) {}
+        return;
+      }
       listening = false;
+      userWantsListening = false;
       btn.classList.remove('animate-pulse', 'ring-4', 'ring-purple-300');
       if (label) label.textContent = '🎙️ Speak scores';
       const errMsg = event.error === 'not-allowed'
@@ -243,23 +325,29 @@
     recognition.onend = () => {
       listening = false;
       btn.classList.remove('animate-pulse', 'ring-4', 'ring-purple-300');
+      // Auto-restart if the user hasn't manually stopped — some browsers
+      // end the session after a short silence even in continuous mode.
+      if (userWantsListening) {
+        try { recognition.start(); return; } catch (e) { /* fallthrough */ }
+      }
       if (label) label.textContent = '🎙️ Speak scores';
-      const text = (transcriptEl && transcriptEl.textContent || '').trim();
-      if (!text || text === '…') return;
-      const results = parseUtterance(text, players);
-      renderPreview(results);
     };
 
     btn.addEventListener('click', () => {
-      if (listening) {
+      if (listening || userWantsListening) {
+        userWantsListening = false;
         try { recognition.stop(); } catch (e) { /* noop */ }
         return;
       }
-      try {
-        recognition.start();
-      } catch (e) {
-        // "already started" — safe to ignore
-      }
+      // Fresh listening session — reset accumulator so previous take doesn't
+      // stack on top of the new one.
+      accumulated = new Map();
+      unmatched = [];
+      finalTranscript = '';
+      if (previewEl) previewEl.classList.add('hidden');
+      userWantsListening = true;
+      try { recognition.start(); }
+      catch (e) { /* "already started" */ }
     });
   }
 
