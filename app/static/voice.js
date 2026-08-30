@@ -88,10 +88,51 @@
     return (2 * inter) / (A.length + B.length);
   }
 
+  // Levenshtein edit distance.
+  function levenshtein(a, b) {
+    a = String(a).toLowerCase(); b = String(b).toLowerCase();
+    if (a === b) return 0;
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    let prev = new Array(b.length + 1);
+    let curr = new Array(b.length + 1);
+    for (let j = 0; j <= b.length; j++) prev[j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      curr[0] = i;
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+        curr[j] = Math.min(
+          curr[j - 1] + 1,       // insertion
+          prev[j] + 1,           // deletion
+          prev[j - 1] + cost     // substitution
+        );
+      }
+      [prev, curr] = [curr, prev];
+    }
+    return prev[b.length];
+  }
+
+  // Normalized Levenshtein similarity in [0, 1].
+  function levenshteinSimilarity(a, b) {
+    a = String(a).toLowerCase(); b = String(b).toLowerCase();
+    const maxLen = Math.max(a.length, b.length);
+    if (maxLen === 0) return 1;
+    return 1 - (levenshtein(a, b) / maxLen);
+  }
+
+  // Hybrid similarity: takes the max of Dice bigram and Levenshtein
+  // similarity. Bigram punishes short names hard on a single vowel swap
+  // ("Hatem" vs "Hatim" -> 0.5); Levenshtein catches those (0.80).
+  function nameSimilarity(a, b) {
+    const dice = diceCoefficient(a, b);
+    const lev = levenshteinSimilarity(a, b);
+    return Math.max(dice, lev);
+  }
+
   function bestNameMatch(spokenName, players) {
     let best = { player: null, score: 0 };
     for (const p of players) {
-      const s = diceCoefficient(spokenName, p);
+      const s = nameSimilarity(spokenName, p);
       if (s > best.score) best = { player: p, score: s };
     }
     return best;
@@ -187,7 +228,7 @@
   }
 
   // Expose for future testing / debugging.
-  window.IQuitVoice = { parseUtterance, diceCoefficient, parseNumberWords };
+  window.IQuitVoice = { parseUtterance, diceCoefficient, levenshteinSimilarity, nameSimilarity, parseNumberWords };
 
   function initVoice() {
     const btn = document.getElementById('voice-mic-btn');
