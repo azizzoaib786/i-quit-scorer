@@ -189,9 +189,6 @@
   // Expose for future testing / debugging.
   window.IQuitVoice = { parseUtterance, diceCoefficient, parseNumberWords };
 
-  let recognition = null;
-  let listening = false;
-
   function initVoice() {
     const btn = document.getElementById('voice-mic-btn');
     if (!btn || btn.dataset.bound === '1') return;
@@ -220,10 +217,30 @@
       return;
     }
 
+    // All state is local to this initVoice invocation so HTMX swaps get
+    // a clean slate. Fresh SpeechRecognition per session too.
+    let recognition = null;
+    let userWantsListening = false;
+    let sessionActive = false; // true between onstart and onend
+
+    let accumulated = new Map();
+    let unmatched = [];
+    let finalTranscript = '';
+
     const setTranscript = (text) => {
       if (!transcriptEl) return;
       transcriptEl.classList.remove('hidden');
       transcriptEl.textContent = text;
+    };
+
+    const setIdleUI = () => {
+      btn.classList.remove('animate-pulse', 'ring-4', 'ring-purple-300');
+      if (label) label.textContent = '🎙️ Speak scores';
+    };
+
+    const setListeningUI = () => {
+      btn.classList.add('animate-pulse', 'ring-4', 'ring-purple-300');
+      if (label) label.textContent = '🔴 Listening… (tap to stop)';
     };
 
     const renderPreview = (results) => {
@@ -249,25 +266,17 @@
       });
       previewEl.innerHTML = lines.join('');
 
-      // Fill the existing inputs. User still reviews and clicks Save.
       for (const r of results) {
         if (!r.player) continue;
         const inp = document.querySelector(`.score-input[data-player="${CSS.escape(r.player)}"]`);
         if (inp && !inp.disabled) {
           inp.value = String(r.delta);
           inp.dispatchEvent(new Event('input', { bubbles: true }));
-          // brief flash
           inp.classList.add('ring-4', 'ring-purple-300');
           setTimeout(() => inp.classList.remove('ring-4', 'ring-purple-300'), 900);
         }
       }
     };
-
-    // Accumulated results across a single "listening" session, keyed
-    // by player. Later utterances for the same player overwrite.
-    let accumulated = new Map(); // player -> {delta, confidence, spoken}
-    let unmatched = [];          // {spoken, delta}
-    let finalTranscript = '';
 
     const rebuildPreview = () => {
       const results = [];
@@ -279,11 +288,9 @@
     };
 
     const applySegment = (segText) => {
-      // Voice commands first — they short-circuit normal parsing.
       const norm = segText.toLowerCase().replace(/[.!?,;:()]/g, ' ').replace(/\s+/g, ' ').trim();
 
       if (COMMAND_PATTERNS.clearAll.test(norm)) {
-        // Wipe every score input and every accumulated entry.
         for (const inp of document.querySelectorAll('.score-input[data-player]')) {
           if (inp.disabled) continue;
           inp.value = '';
@@ -301,7 +308,6 @@
       }
 
       if (COMMAND_PATTERNS.undo.test(norm)) {
-        // Drop the most recently added accumulated entry.
         const last = Array.from(accumulated.keys()).pop();
         if (last) {
           const inp = document.querySelector(`.score-input[data-player="${CSS.escape(last)}"]`);
@@ -334,7 +340,6 @@
         }
       }
 
-      // Normal name+score parsing.
       const results = parseUtterance(segText, players);
       for (const r of results) {
         if (r.player) {
@@ -346,81 +351,109 @@
       rebuildPreview();
     };
 
-    recognition = new SR();
-    recognition.lang = navigator.language || 'en-US';
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
+    // Build a fresh recognition instance for each listening session.
+    const buildRecognition = () => {
+      const r = new SR();
+      r.lang = navigator.language || 'en-US';
+      r.continuous = true;
+      r.interimResults = true;
+      r.maxAlternatives = 1;
 
-    let userWantsListening = false;
+      r.onstart = () => {
+        sessionActive = true;
+        setListeningUI();
+        if (finalTranscript === '') setTranscript('Say a player and score, pause, then the next…');
+      };
 
-    recognition.onstart = () => {
-      listening = true;
-      btn.classList.add('animate-pulse', 'ring-4', 'ring-purple-300');
-      if (label) label.textContent = '🔴 Listening… (tap to stop)';
-      if (finalTranscript === '') setTranscript('Say a player and score, pause, then the next…');
+      r.onresult = (event) => {
+        let interim = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const seg = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            const trimmed = seg.trim();
+            if (trimmed) {
+              finalTranscript = (finalTranscript ? finalTranscript + ' • ' : '') + trimmed;
+              applySegment(trimmed);
+            }
+          } else {
+            interim += seg;
+          }
+        }
+        const display = (finalTranscript + (interim ? '  |  ' + interim.trim() : '')).trim();
+        setTranscript(display || '…');
+      };
+
+      r.onerror = (event) => {
+        if (event.error === 'no-speech') {
+          // Silent restart on the natural silence timeout.
+          return;
+        }
+        sessionActive = false;
+        userWantsListening = false;
+        setIdleUI();
+        const errMsg = event.error === 'not-allowed'
+          ? 'Microphone permission denied. Enable it in the browser and try again.'
+          : `Error: ${event.error}`;
+        setTranscript(errMsg);
+      };
+
+      r.onend = () => {
+        sessionActive = false;
+        if (userWantsListening) {
+          // Browser closed the session on its own; reopen.
+          setTimeout(() => {
+            if (userWantsListening && !sessionActive) {
+              try { r.start(); } catch (e) { /* start races — retry once */
+                setTimeout(() => { if (userWantsListening) safeStart(); }, 150);
+              }
+            }
+          }, 60);
+        } else {
+          setIdleUI();
+        }
+      };
+
+      return r;
     };
 
-    recognition.onresult = (event) => {
-      let interim = '';
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const seg = event.results[i][0].transcript;
-        if (event.results[i].isFinal) {
-          const trimmed = seg.trim();
-          if (trimmed) {
-            finalTranscript = (finalTranscript ? finalTranscript + ' • ' : '') + trimmed;
-            applySegment(trimmed);
-          }
-        } else {
-          interim += seg;
+    const safeStart = () => {
+      if (recognition) {
+        try { recognition.abort(); } catch (e) { /* noop */ }
+      }
+      recognition = buildRecognition();
+      try { recognition.start(); }
+      catch (e) {
+        // "already started" — retry after abort
+        try { recognition.abort(); } catch (_) {}
+        setTimeout(() => {
+          try { recognition.start(); } catch (_) { /* give up */ }
+        }, 100);
+      }
+    };
+
+    const stopListening = () => {
+      userWantsListening = false;
+      if (recognition) {
+        try { recognition.stop(); } catch (e) {
+          try { recognition.abort(); } catch (_) {}
         }
       }
-      const display = (finalTranscript + (interim ? '  |  ' + interim.trim() : '')).trim();
-      setTranscript(display || '…');
-    };
-
-    recognition.onerror = (event) => {
-      // "no-speech" fires often in continuous mode; just restart silently.
-      if (event.error === 'no-speech' && userWantsListening) {
-        try { recognition.stop(); } catch (e) {}
-        return;
-      }
-      listening = false;
-      userWantsListening = false;
-      btn.classList.remove('animate-pulse', 'ring-4', 'ring-purple-300');
-      if (label) label.textContent = '🎙️ Speak scores';
-      const errMsg = event.error === 'not-allowed'
-        ? 'Microphone permission denied. Enable it in the browser and try again.'
-        : `Error: ${event.error}`;
-      setTranscript(errMsg);
-    };
-
-    recognition.onend = () => {
-      listening = false;
-      btn.classList.remove('animate-pulse', 'ring-4', 'ring-purple-300');
-      // Auto-restart if the user hasn't manually stopped — some browsers
-      // end the session after a short silence even in continuous mode.
-      if (userWantsListening) {
-        try { recognition.start(); return; } catch (e) { /* fallthrough */ }
-      }
-      if (label) label.textContent = '🎙️ Speak scores';
+      setIdleUI();
     };
 
     btn.addEventListener('click', () => {
-      if (listening || userWantsListening) {
-        userWantsListening = false;
-        try { recognition.stop(); } catch (e) { /* noop */ }
+      if (userWantsListening || sessionActive) {
+        stopListening();
         return;
       }
-      // Fresh listening session — reset accumulator so previous take doesn't
-      // stack on top of the new one.
+      // Fresh session.
       accumulated = new Map();
       unmatched = [];
       finalTranscript = '';
       if (previewEl) previewEl.classList.add('hidden');
       userWantsListening = true;
-      try { recognition.start(); }
-      catch (e) { /* "already started" */ }
+      setListeningUI();
+      safeStart();
     });
   }
 
