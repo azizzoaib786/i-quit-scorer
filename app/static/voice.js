@@ -26,6 +26,23 @@
   };
   const NEG_WORDS = new Set(['minus', 'negative', 'take', 'less', 'subtract', 'deduct']);
 
+  // Voice commands the scorer can say mid-session to correct mistakes.
+  // Each entry is a regex applied to the cleaned lowercase segment.
+  const COMMAND_PATTERNS = {
+    // "clear all", "reset all", "make all zero", "make all of them zero",
+    // "zero all", "everyone zero", "start over", "scratch that", "mistake"
+    clearAll: new RegExp(
+      '\\b(clear|reset|zero|erase|delete|remove)\\s+(all|every ?one|scores|everything)\\b' +
+      '|\\b(all|every ?one|everything)(?:\\s+of\\s+them)?\\s+(zero|clear|reset)\\b' +
+      '|\\bmake\\s+(all|every ?one|everything)(?:\\s+of\\s+them)?\\s+(zero|clear|blank)\\b' +
+      '|\\b(start over|start again|scratch that|mistake|do over)\\b'
+    ),
+    // "clear ali", "reset hatim" — captured name in group 2
+    clearOne: /\b(clear|reset|zero|erase|delete|remove)\s+([a-z][a-z\s]{0,30}?)\s*$/,
+    // "undo" / "undo last" / "take back"
+    undo: /\b(undo|undo last|take back|revert)\b/
+  };
+
   // Parse a token slice into a number ("twenty", "twenty five",
   // "one hundred and ten", "42"). Returns null if unparseable.
   function parseNumberWords(tokens) {
@@ -262,6 +279,62 @@
     };
 
     const applySegment = (segText) => {
+      // Voice commands first — they short-circuit normal parsing.
+      const norm = segText.toLowerCase().replace(/[.!?,;:()]/g, ' ').replace(/\s+/g, ' ').trim();
+
+      if (COMMAND_PATTERNS.clearAll.test(norm)) {
+        // Wipe every score input and every accumulated entry.
+        for (const inp of document.querySelectorAll('.score-input[data-player]')) {
+          if (inp.disabled) continue;
+          inp.value = '';
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+          inp.classList.add('ring-4', 'ring-rose-300');
+          setTimeout(() => inp.classList.remove('ring-4', 'ring-rose-300'), 900);
+        }
+        accumulated = new Map();
+        unmatched = [];
+        if (previewEl) {
+          previewEl.classList.remove('hidden');
+          previewEl.innerHTML = '<div class="text-rose-700">🧹 Cleared all scores — start over.</div>';
+        }
+        return;
+      }
+
+      if (COMMAND_PATTERNS.undo.test(norm)) {
+        // Drop the most recently added accumulated entry.
+        const last = Array.from(accumulated.keys()).pop();
+        if (last) {
+          const inp = document.querySelector(`.score-input[data-player="${CSS.escape(last)}"]`);
+          if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+          accumulated.delete(last);
+          rebuildPreview();
+          if (previewEl) previewEl.insertAdjacentHTML('afterbegin',
+            `<div class="text-amber-800">↩️ Undid last: <b>${last}</b></div>`);
+        }
+        return;
+      }
+
+      const clearOneMatch = norm.match(COMMAND_PATTERNS.clearOne);
+      if (clearOneMatch) {
+        const spokenName = clearOneMatch[2].trim();
+        const m = bestNameMatch(spokenName, players);
+        if (m.player && m.score >= 0.6) {
+          const inp = document.querySelector(`.score-input[data-player="${CSS.escape(m.player)}"]`);
+          if (inp && !inp.disabled) {
+            inp.value = '';
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.classList.add('ring-4', 'ring-rose-300');
+            setTimeout(() => inp.classList.remove('ring-4', 'ring-rose-300'), 900);
+          }
+          accumulated.delete(m.player);
+          rebuildPreview();
+          if (previewEl) previewEl.insertAdjacentHTML('afterbegin',
+            `<div class="text-rose-700">🧹 Cleared <b>${m.player}</b>.</div>`);
+          return;
+        }
+      }
+
+      // Normal name+score parsing.
       const results = parseUtterance(segText, players);
       for (const r of results) {
         if (r.player) {
